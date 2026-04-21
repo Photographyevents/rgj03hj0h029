@@ -21,7 +21,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 GOOGLE_CREDS_JSON  = os.getenv("GOOGLE_SHEETS_CREDS_JSON")
 
-# ================== STRICTOR DETECTION ==================
+# ================== STRICTER DETECTION ==================
 DASHBOARDS = {
     "jenkins": {
         "name": "Jenkins (OPEN)",
@@ -89,29 +89,32 @@ def get_ssl_domain(ip, port):
 # ================== GRAFANA EXPLOIT CHECK ==================
 
 def check_grafana_vulnerabilities(url):
-    """Attempts admin:admin login via API for Grafana hits."""
-    # Ensure URL doesn't end with a slash for clean concatenation
+    """Checks for admin:admin AND the new CVE-2026-27877 Credential Leak."""
     base_url = url.split('/login')[0].rstrip('/')
-    api_url = f"{base_url}/api/admin/stats"
-    
+    results = []
+
+    # --- 1. Check for admin:admin ---
     try:
-        # Basic Auth check for admin:admin
+        api_url = f"{base_url}/api/admin/stats"
         r = requests.get(api_url, auth=('admin', 'admin'), timeout=5, verify=False)
         if r.status_code == 200 and "dashboards" in r.text:
-            return "🚨 CRITICAL: Default Credentials (admin:admin) WORK!"
-    except:
-        pass
-    
-    # Also check if it's just completely open without login
+            results.append("🚨 CRITICAL: admin:admin works")
+    except: pass
+
+    # --- 2. Check for CVE-2026-27877 (Public Dashboard Credential Leak) ---
     try:
-        search_url = f"{base_url}/api/search"
-        r_open = requests.get(search_url, timeout=5, verify=False)
-        if r_open.status_code == 200 and isinstance(r_open.json(), list):
-            return "🔓 OPEN ACCESS: Unauthenticated Dashboard List found."
-    except:
-        pass
+        public_api = f"{base_url}/api/public-dashboards"
+        r_cve = requests.get(public_api, timeout=5, verify=False)
         
-    return None
+        if r_cve.status_code == 200:
+            data = r_cve.text
+            if '"secureJsonData"' in data or '"password"' in data:
+                 results.append("🔥 EXPLOIT: CVE-2026-27877 Credential Leak detected!")
+            else:
+                 results.append("🔓 OPEN: Public Dashboards Enabled (Review manually)")
+    except: pass
+
+    return " | ".join(results) if results else None
 
 # ================== SCANNING LOGIC ==================
 
@@ -133,15 +136,12 @@ def check_ip(ip):
                     r = requests.get(url, timeout=TIMEOUT, verify=False, headers={"User-Agent": USER_AGENT})
                     
                     if r.status_code in db["ok_codes"]:
-                        # 1. First check if it's an OPEN dashboard
                         is_open = score_response(r.text, db)
                         vuln_note = None
                         
-                        # 2. Special handling for Grafana (Check defaults even if page is a login wall)
                         if key == "grafana":
                             vuln_note = check_grafana_vulnerabilities(url)
                         
-                        # Report if it's either open OR has a vulnerability
                         if is_open or vuln_note:
                             domain = get_ssl_domain(ip, port)
                             ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -152,12 +152,15 @@ def check_ip(ip):
                             print(f"[!] {msg.replace('\\n', ' | ')}")
                             send_telegram(msg)
                             update_google_sheets([ts, ip, url, status_label, domain])
-                            return # Move to next IP
+                            return # Found hit, move to next IP
                 except:
                     continue
 
 def main():
-    if not os.path.exists(INPUT_FILE): return
+    if not os.path.exists(INPUT_FILE):
+        print(f"File {INPUT_FILE} not found.")
+        return
+
     with open(INPUT_FILE, "r") as f:
         ips = [line.strip() for line in f if line.strip()]
 
@@ -165,6 +168,7 @@ def main():
     for index, ip in enumerate(ips):
         print(f"[{index+1}/{len(ips)}] Checking {ip}...", end="\r")
         check_ip(ip)
+    print("\n[*] Scan complete.")
 
 if __name__ == "__main__":
     main()
